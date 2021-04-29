@@ -2,10 +2,13 @@ import cv2
 import numpy as np
 from math import floor
 from tqdm import tqdm
+from json import dumps
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
+
+INPUT_PATH = "../data/AwmHb44_ouw.mp4"
 
 def preprocess_frame(frame, normalize=True):
     h, w, _ = frame.shape
@@ -32,10 +35,12 @@ def color_histogram(frame, bin_count=16):
 
     return np.concatenate(histograms)
 
-video = cv2.VideoCapture("../data/sample_2.mp4")
+video = cv2.VideoCapture(INPUT_PATH)
 FPS = video.get((cv2.CAP_PROP_FPS))
+WIDTH = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))   # float `width`
+HEIGHT = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 FRAME_COUNT = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-#FRAME_COUNT = 10000
+#FRAME_COUNT = 3000
 BIN_COUNT = 16
 
 features = np.zeros((FRAME_COUNT, BIN_COUNT * 3), dtype=float)
@@ -114,28 +119,56 @@ seen_labels = set()
 TARGET_FRAME_COUNT = 600
 FRAMES_PER_CLUSTER = TARGET_FRAME_COUNT // CLUSTER_COUNT
 added_frames_with_label = 0
+importance_scores = np.zeros((len(labels),), dtype=float)
 
 # TODO refactor
 # https://theailearner.com/2018/10/15/creating-video-from-images-using-opencv-python/
-output_video = cv2.VideoWriter("../out/summarized.avi", cv2.VideoWriter_fourcc(*"DIVX"), FPS, (1280, 720))
-video = cv2.VideoCapture("../data/sample_2.mp4")
+output_video = cv2.VideoWriter("../out/summarized.avi", cv2.VideoWriter_fourcc(*"DIVX"), FPS, (WIDTH, HEIGHT))
+video = cv2.VideoCapture(INPUT_PATH)
+
+prev_label = None
+prev_frame = None
+acc_mse, segment_size, segment_start = 0, 0, 0
+use_segment = False
+
+for i in range(0, FRAME_COUNT):
+    _, frame = video.read()
+    label = labels[i]
+    frame = preprocess_frame(frame, normalize=True)
+
+    if prev_label != label or i == FRAME_COUNT - 1 or segment_size >= FRAMES_PER_CLUSTER:
+        if segment_size > 1:
+            importance_scores[segment_start : segment_start + segment_size] = acc_mse / (segment_size - 1)
+
+        use_segment = seq_len[i] > FRAMES_PER_CLUSTER * 0.8 and prev_label != label
+        acc_mse = 0
+        segment_start = i
+        segment_size = 1
+
+    elif prev_label == label and use_segment:
+        segment_size += 1
+        acc_mse = np.sum((frame - prev_frame) ** 2)
+
+    prev_label = label
+    prev_frame = frame
+
+
+max_score = max(1., np.max(importance_scores))
+importance_scores = importance_scores / max_score
+with open("scores1.npy", "wb") as f:
+    np.save(f, importance_scores)
+
+video.release()
+video = cv2.VideoCapture(INPUT_PATH)
+
+min_segment_score = np.min(np.sort(np.unique(importance_scores))[::-1][:CLUSTER_COUNT])
 
 for i, label in enumerate(labels):
     _, frame = video.read()
 
-    if seq_len[i] < floor(FRAMES_PER_CLUSTER * 0.8):
-        continue
-
-    if not label in seen_labels or (current_label == label and added_frames_with_label < FRAMES_PER_CLUSTER):
-        current_label = label
-        seen_labels.add(label)
-
+    score = importance_scores[i]
+    if score >= min_segment_score:
         output_video.write(frame)
-        added_frames_with_label += 1
 
-    else:
-        current_label = None
-        added_frames_with_label = 0
-
-video.release()
 output_video.release()
+video.release()
